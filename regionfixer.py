@@ -34,7 +34,10 @@ from regionfixer_core.interactive import InteractiveLoop
 from regionfixer_core.scan import (console_scan_world,
                                    console_scan_regionset,
                                    ChildProcessException)
-from regionfixer_core.util import entitle, is_bare_console
+from regionfixer_core.entity_presets import PRESETS, resolve_entity_types
+from regionfixer_core.util import (DEFAULT_POSITION_BOUND_XZ,
+                                   entitle,
+                                   is_bare_console)
 from regionfixer_core.version import version_string
 from regionfixer_core import native
 from regionfixer_core import world
@@ -61,7 +64,8 @@ def fix_bad_chunks(options, scanned_obj):
     # In the same order as in FIXABLE_CHUNK_PROBLEMS
     options_fix = [options.fix_corrupted,
                    options.fix_missing_tag,
-                   options.fix_wrong_located]
+                   options.fix_wrong_located,
+                   options.fix_entity_position]
     fixing = list(zip(options_fix, c.FIXABLE_CHUNK_PROBLEMS))
     for fix, problem in fixing:
         status = c.CHUNK_STATUS_TEXT[problem]
@@ -70,7 +74,9 @@ def fix_bad_chunks(options, scanned_obj):
             if total:
                 text = ' Repairing chunks with status: {0} '.format(status)
                 print(("\n{0:#^60}".format(text)))
-                counter = scanned_obj.fix_problematic_chunks(problem)
+                counter = scanned_obj.fix_problematic_chunks(problem,
+                                                             options.entity_limit,
+                                                             options.position_bound)
                 print(("\nRepaired {0} chunks with status: {1}".format(counter,
                                                                      status)))
             else:
@@ -111,6 +117,52 @@ def delete_bad_chunks(options, scanned_obj):
                                                                       status)))
             else:
                 print(("No chunks to delete with status: {0}".format(status)))
+
+
+def fix_player_positions(options, world_obj):
+    """ Resets players with an invalid position to the world spawn.
+
+    Inputs:
+    options -- argparse arguments, the whole argparse.ArgumentParser() object
+    world_obj -- a World object from world.py
+
+    Returns nothing.
+    """
+
+    if not options.fix_player_position:
+        return
+    status = c.DATAFILE_STATUS_TEXT[c.DATAFILE_INVALID_POSITION]
+    if world_obj.list_invalid_player_files():
+        text = ' Repairing player files with status: {0} '.format(status)
+        print(("\n{0:#^60}".format(text)))
+        counter = world_obj.fix_player_positions()
+        print(("\nRepaired {0} player files with status: {1}".format(counter, status)))
+    else:
+        print(("No player files to fix with status: {0}".format(status)))
+
+
+def sweep_entities(options, regionsets, title, world_root=None):
+    """ Runs the --remove-entity-types sweep over some region sets and prints the result.
+
+    Inputs:
+    options -- argparse arguments, the whole argparse.ArgumentParser() object
+    regionsets -- list of RegionSet objects
+    title -- string naming what is being swept
+    world_root -- world path, used to shorten the printed region file paths
+
+    Returns nothing.
+    """
+
+    type_ids = resolve_entity_types(options.remove_entity_types)
+    mode = "Removing" if options.apply_entity_removal else "Dry run, looking for"
+    print((entitle(' {0} entity types in: {1} '.format(mode, title), 0)))
+    print("Matching {0} entity ids: {1}".format(len(type_ids), ", ".join(sorted(type_ids))))
+    report = world.sweep_entity_types(regionsets, type_ids,
+                                      include_named=options.include_named,
+                                      include_tagged=options.include_tagged,
+                                      apply=options.apply_entity_removal)
+    print("")
+    print(report.summary(options.apply_entity_removal, world_root))
 
 
 def delete_bad_regions(options, scanned_obj):
@@ -280,6 +332,92 @@ def main():
                         action='store',
                         type=int)
 
+    parser.add_argument('--check-entity-position',
+                        '--cep',
+                        help='Also report chunks holding an entity whose Pos is NaN, '
+                             'infinite or beyond --position-bound (status: Entity out '
+                             'of bounds). Such an entity can crash a server with '
+                             '"Trying to create chunk out of reasonable bounds". '
+                             'Region files holding entities are scanned by the Python '
+                             'scanner while this is on, so the scan is slower.',
+                        dest='check_entity_position',
+                        default=False,
+                        action='store_true')
+
+    parser.add_argument('--check-player-position',
+                        '--cpp',
+                        help='Also report player files whose Pos is NaN, infinite or '
+                             'beyond --position-bound, or whose Motion is not finite '
+                             '(status: Invalid player position).',
+                        dest='check_player_position',
+                        default=False,
+                        action='store_true')
+
+    parser.add_argument('--position-bound',
+                        '--pb',
+                        help='Largest absolute X/Z coordinate the position checks accept '
+                             '(default = {0}, the vanilla world border limit). A chunk '
+                             'coordinate of 134217727 or more is always rejected.'.format(
+                                 DEFAULT_POSITION_BOUND_XZ),
+                        metavar='<blocks>',
+                        dest='position_bound',
+                        default=DEFAULT_POSITION_BOUND_XZ,
+                        action='store',
+                        type=int)
+
+    parser.add_argument('--fix-entity-position',
+                        '--fep',
+                        help='[WARNING!] This option deletes! Remove only the entities '
+                             'that fail the entity position check from their chunk, '
+                             'leaving the rest of the chunk alone. Implies '
+                             '--check-entity-position.',
+                        dest='fix_entity_position',
+                        default=False,
+                        action='store_true')
+
+    parser.add_argument('--fix-player-position',
+                        '--fpp',
+                        help='Move players that fail the player position check to the '
+                             'world spawn from level.dat and zero their Motion. The '
+                             'original file is kept as <uuid>.dat.bak. Implies '
+                             '--check-player-position.',
+                        dest='fix_player_position',
+                        default=False,
+                        action='store_true')
+
+    parser.add_argument('--remove-entity-types',
+                        help='Sweep every chunk of every region and entities file for '
+                             'entities with these ids, whether or not the server ever '
+                             'loads them. Comma separated ids (minecraft:zombie,'
+                             'minecraft:skeleton) and/or presets ({0}); presets and ids '
+                             'are combined. Without --apply-entity-removal this is a '
+                             'dry run that only reports what would be removed.'.format(
+                                 ", ".join(sorted(PRESETS))),
+                        metavar='<ids>',
+                        dest='remove_entity_types',
+                        default=None)
+
+    parser.add_argument('--apply-entity-removal',
+                        help='[WARNING!] This option deletes! Actually remove the '
+                             'entities matched by --remove-entity-types.',
+                        dest='apply_entity_removal',
+                        default=False,
+                        action='store_true')
+
+    parser.add_argument('--include-named',
+                        help='Let --remove-entity-types also remove matching entities '
+                             'that have a CustomName. Named entities are kept by default.',
+                        dest='include_named',
+                        default=False,
+                        action='store_true')
+
+    parser.add_argument('--include-tagged',
+                        help='Let --remove-entity-types also remove matching entities '
+                             'that have Tags. Tagged entities are kept by default.',
+                        dest='include_tagged',
+                        default=False,
+                        action='store_true')
+
     parser.add_argument('--processes',
                         '-p',
                         help='Set the number of workers to use for scanning. The '
@@ -397,7 +535,8 @@ def main():
     any_chunk_replace_option = args.replace_corrupted or \
         args.replace_wrong_located or \
         args.replace_entities or \
-        args.replace_shared_offset
+        args.replace_shared_offset or \
+        args.replace_entity_position
     any_region_replace_option = args.replace_too_small
 
     if False or args.summary: # removed interactive mode args.interactive
@@ -429,6 +568,23 @@ def main():
     if args.entity_limit < 0:
         parser.error("Error: The entity limit must be at least 0!")
 
+    if args.position_bound <= 0:
+        parser.error("Error: The position bound must be greater than 0!")
+
+    if args.apply_entity_removal and not args.remove_entity_types:
+        parser.error("Error: --apply-entity-removal needs --remove-entity-types")
+
+    if args.remove_entity_types is not None and not resolve_entity_types(args.remove_entity_types):
+        parser.error("Error: --remove-entity-types needs at least one entity id or preset")
+
+    # The fix and replace options act on the statuses the checks produce, so
+    # asking for them turns the matching check on. None means "check off".
+    check_entity = (args.check_entity_position or args.fix_entity_position or
+                    args.replace_entity_position)
+    check_player = args.check_player_position or args.fix_player_position
+    entity_position_bound = args.position_bound if check_entity else None
+    player_position_bound = args.position_bound if check_player else None
+
     # Do things with the option options args
     # Create a list of worlds containing the backups of the region files
     if args.backups:
@@ -452,8 +608,14 @@ def main():
 
         if len(regionset) > 0:
 
+            # The sweep reads chunks on its own, so it runs before the scan
+            # and the scan then reports the world as the sweep left it.
+            if args.remove_entity_types:
+                sweep_entities(args, [regionset], "selected region files")
+
             console_scan_regionset(regionset, args.processes, args.entity_limit,
-                                   args.delete_entities, args.verbose)
+                                   args.delete_entities, args.verbose,
+                                   entity_position_bound)
             print((regionset.generate_report(True)))
 
             # Delete chunks
@@ -484,10 +646,14 @@ def main():
 
         for w in world_list:
             w_name = w.get_name()
+            if args.remove_entity_types:
+                sweep_entities(args, w.regionsets, w_name, w.path)
+
             print((entitle(' Scanning world: {0} '.format(w_name), 0)))
 
             console_scan_world(w, args.processes, args.entity_limit,
-                               args.delete_entities, args.verbose)
+                               args.delete_entities, args.verbose,
+                               entity_position_bound, player_position_bound)
 
             print("")
             print((entitle('Scan results for: {0}'.format(w_name), 0)))
@@ -498,18 +664,22 @@ def main():
             if backup_worlds and len(world_list) <= 1:
                 del_ent = args.delete_entities
                 ent_lim = args.entity_limit
-                options_replace = [args.replace_corrupted,
-                                   args.replace_wrong_located,
-                                   args.replace_entities,
-                                   args.replace_shared_offset]
-                replacing = list(zip(options_replace, c.CHUNK_PROBLEMS_ITERATOR))
-                for replace, (problem, status, arg) in replacing:
+                # Explicit pairs: the new status is not next to the old ones
+                # in CHUNK_PROBLEMS, so a positional zip would misalign.
+                replacing = [(args.replace_corrupted, c.CHUNK_CORRUPTED),
+                             (args.replace_wrong_located, c.CHUNK_WRONG_LOCATED),
+                             (args.replace_entities, c.CHUNK_TOO_MANY_ENTITIES),
+                             (args.replace_shared_offset, c.CHUNK_SHARED_OFFSET),
+                             (args.replace_entity_position, c.CHUNK_ENTITY_OUT_OF_BOUNDS)]
+                for replace, problem in replacing:
+                    status = c.CHUNK_STATUS_TEXT[problem]
                     if replace:
                         total = w.count_chunks(problem)
                         if total:
                             text = " Replacing chunks with status: {0} ".format(status)
                             print(("{0:#^60}".format(text)))
-                            fixed = w.replace_problematic_chunks(backup_worlds, problem, ent_lim, del_ent)
+                            fixed = w.replace_problematic_chunks(backup_worlds, problem, ent_lim, del_ent,
+                                                                 entity_position_bound)
                             print(("\n{0} replaced of a total of {1} chunks with status: {2}".format(fixed, total, status)))
                         else:
                             print(("No chunks to replace with status: {0}".format(status)))
@@ -554,6 +724,9 @@ def main():
 
             # fix chunks
             fix_bad_chunks(args, w)
+
+            # fix player files
+            fix_player_positions(args, w)
 
             # print a summary for this world
             if args.summary:

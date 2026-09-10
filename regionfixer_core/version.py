@@ -21,5 +21,5 @@
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-version_string = "0.5.0"
+version_string = "0.6.0"
 version_numbers = version_string.split('.')

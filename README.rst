@@ -80,6 +80,60 @@ chunk by chunk.
 
 To turn it off, pass ``--no-native`` or set ``REGIONFIXER_NO_NATIVE=1``.
 
+Position sanity checks
+======================
+
+A player or mob whose stored ``Pos`` is NaN, infinite or absurdly large can
+crash a server every time it is loaded, typically with ``Trying to create
+chunk out of reasonable bounds``. Two opt-in checks find them::
+
+    python regionfixer.py --check-player-position --check-entity-position "/path/to/world"
+
+* ``--check-player-position`` (``--cpp``) marks player files whose ``Pos``
+  fails the check or whose ``Motion`` is not finite as ``Invalid player
+  position``. The summary and ``--log`` show the UUID, ``Pos`` and
+  ``Dimension``.
+* ``--check-entity-position`` (``--cep``) marks chunks in ``region`` and
+  ``entities`` files that hold such an entity as ``Entity out of bounds``.
+  ``--log`` lists each offending entity. Region files with entities are
+  scanned by the Python scanner while this is on.
+* ``--position-bound`` (``--pb``) sets the largest accepted absolute X/Z
+  (default 30,000,000). Y is limited to 20,000,000, and a chunk coordinate of
+  134,217,727 or more is always rejected.
+
+Repairs:
+
+* ``--fix-entity-position`` (``--fep``) removes only the offending entities
+  and leaves the rest of the chunk alone.
+* ``--replace-entity-position`` (``--reob``) replaces those chunks from
+  ``--backups`` instead.
+* ``--fix-player-position`` (``--fpp``) moves the player to the world spawn
+  from ``level.dat`` and zeros their ``Motion``. The original file is kept as
+  ``<uuid>.dat.bak``.
+
+The fix and replace options turn on the matching check by themselves.
+
+Removing entity types
+=====================
+
+``/kill`` only reaches loaded chunks. ``--remove-entity-types`` reads every
+chunk of every region and entities file, loaded or not, and removes entities
+by id. It takes comma separated ids and/or the ``hostile`` preset (alias
+``monsters``), and the two combine::
+
+    python regionfixer.py --remove-entity-types hostile "/path/to/world"
+    python regionfixer.py --remove-entity-types hostile,minecraft:enderman --apply-entity-removal "/path/to/world"
+
+Without ``--apply-entity-removal`` nothing is written; the run prints what
+would be removed, per entity id and per region file. Entities with a
+``CustomName`` or ``Tags`` are kept unless ``--include-named`` or
+``--include-tagged`` is given. The ``hostile`` preset never contains
+villagers, pets, mounts, item entities, item frames, armor stands, paintings,
+boats or minecarts; it is a plain list in
+``regionfixer_core/entity_presets.py``.
+
+Stop the server before using any of these repairs.
+
 Worker count
 ============
 

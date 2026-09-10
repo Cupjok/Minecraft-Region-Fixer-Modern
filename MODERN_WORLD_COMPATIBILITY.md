@@ -58,6 +58,21 @@ While adding regression coverage, older repair issues were also corrected:
 - cached backup region scans are separated by dimension/type so identically
   numbered regions in different dimensions do not collide.
 
+## Position checks and entity sweeps
+
+The opt-in position checks (`--check-player-position`, `--check-entity-position`)
+and the `--remove-entity-types` sweep read entities from every storage place Region
+Fixer knows about:
+
+- `Level.Entities` in pre-1.17 level chunks, and in 1.17 chunks that still embed them;
+- the root `entities` list of 1.18+ level chunks, when present;
+- `Entities` in the 1.17+ `entities/*.mca` files.
+
+Player files are read from `playerdata/`, `players/data/` and the old `players/`
+folder. `--fix-player-position` reads the spawn from either `Data.SpawnX/Y/Z` or the
+1.21.9+ `Data.spawn` compound, and writes `Dimension` in the form the file already
+uses (string ids, or the pre-1.16 integer 0).
+
 ## Scan reporting
 
 The terminal scan report now provides a detailed summary of file counts, chunk

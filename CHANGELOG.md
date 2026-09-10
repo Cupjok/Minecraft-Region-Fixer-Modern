@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.6.0 - Position sanity checks
+
+Motivated by a Purpur server that kept crashing with `Trying to create chunk out of
+reasonable bounds: [134217727, 134217727]`: a player's `Pos` had been saved as roughly
+`x=1.8e16, y=2.0e10, z=1.4e14` during a lag spike, and a Zombie in the world had a
+similar `Pos`.
+
+### Added
+
+- `--check-player-position` (`--cpp`): reports player files (`playerdata/`,
+  `players/data/` and old `players/`) whose `Pos` is NaN, infinite or beyond the bound,
+  or whose `Motion` is not finite, with the new status `Invalid player position`. The
+  UUID, `Pos` and `Dimension` are shown in the scan summary and in `--log`.
+- `--check-entity-position` (`--cep`): reports chunks holding an entity (or a passenger
+  of one) with such a `Pos`, with the new status `Entity out of bounds`, in both
+  `region/*.mca` (embedded `Level.Entities` and 1.18+ `entities`) and `entities/*.mca`.
+  `--log` lists the offending entity ids and positions.
+- `--position-bound` (`--pb`): largest accepted absolute X/Z, 30,000,000 by default. A
+  chunk coordinate of 134,217,727 or more is always rejected.
+- `--fix-entity-position` (`--fep`): removes only the failing entities and rewrites the
+  chunk. `--replace-entity-position` (`--reob`) replaces the chunk from a backup.
+- `--fix-player-position` (`--fpp`): moves the player to the `level.dat` spawn (either
+  `SpawnX/Y/Z` or the 1.21.9+ `spawn` compound, `0, 64, 0` if neither exists), zeros
+  `Motion` and the fall distance, sets `Dimension` to the spawn dimension, and keeps the
+  original as `<uuid>.dat.bak`.
+- `--remove-entity-types <ids>`: sweeps every chunk of every region and entities file
+  for the given entity ids and/or the `hostile` (alias `monsters`) preset, including
+  chunks the server never loads. It is a dry run unless `--apply-entity-removal` is
+  given. Entities with a `CustomName` or `Tags` are kept unless `--include-named` /
+  `--include-tagged` is passed. Riders are checked too, so a chicken jockey loses its
+  zombie. The preset lives in `regionfixer_core/entity_presets.py`.
+
+### Notes
+
+- Both checks are off by default, so a plain scan behaves exactly as before. The fix
+  and replace options turn on the matching check.
+- The native scanner does not read entity positions yet. With `--check-entity-position`
+  it hands every region file that holds entities back to the Python scanner, so those
+  scans are slower.
+- A chunk still has one status. Wrong located wins over entity out of bounds, which wins
+  over too many entities. The entity count is kept, and after `--fix-entity-position`
+  a chunk that is still above `--entity-limit` is reported as too many entities.
+
 ## 0.5.0 - Native scanner
 
 ### Added

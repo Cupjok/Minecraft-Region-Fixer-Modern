@@ -21,9 +21,91 @@
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import math
+import numbers
 import platform
 import sys
 import traceback
+
+
+# Default bounds for is_position_sane(). The horizontal one matches the
+# 30,000,000 block hard limit of the vanilla world border.
+DEFAULT_POSITION_BOUND_XZ = 30000000
+DEFAULT_POSITION_BOUND_Y = 20000000
+
+# Integer.MAX_VALUE // 16. A block coordinate whose chunk coordinate reaches
+# this value makes vanilla throw "Trying to create chunk out of reasonable
+# bounds", so it is never accepted whatever bound the user configured.
+MAX_CHUNK_COORDINATE = 134217727
+
+
+def is_position_sane(x, y, z, max_abs_xz=DEFAULT_POSITION_BOUND_XZ,
+                     max_abs_y=DEFAULT_POSITION_BOUND_Y):
+    """ Return True if an entity or player position is believable.
+
+    Inputs:
+     - x, y, z -- Numbers, the position to check.
+     - max_abs_xz -- Largest accepted absolute value for x and z.
+     - max_abs_y -- Largest accepted absolute value for y.
+
+    Return:
+     - boolean -- False for None, NaN, infinity, anything beyond the bounds
+                  and anything whose chunk coordinate reaches
+                  MAX_CHUNK_COORDINATE.
+
+    """
+
+    for v in (x, y, z):
+        if v is None or math.isnan(v) or math.isinf(v):
+            return False
+    if abs(x) > max_abs_xz or abs(z) > max_abs_xz:
+        return False
+    if abs(y) > max_abs_y:
+        return False
+    # Checked separately so a very large --position-bound cannot let a
+    # position through that vanilla itself would refuse to load.
+    if abs(x) // 16 >= MAX_CHUNK_COORDINATE or abs(z) // 16 >= MAX_CHUNK_COORDINATE:
+        return False
+    return True
+
+
+def is_vector_finite(values):
+    """ Return True if every value of a vector (for example Motion) is finite. """
+
+    return all(v is not None and math.isfinite(v) for v in values)
+
+
+def read_nbt_vector(tag, length=3):
+    """ Read a TAG_List of numbers, such as Pos or Motion, as a tuple.
+
+    Inputs:
+     - tag -- An nbt TAG_List, or None.
+     - length -- Number of elements the list must have.
+
+    Return:
+     - tuple -- The values as floats, or None when the tag is missing or is
+                not a list of exactly `length` numbers.
+
+    A malformed tag returns None instead of raising. Vanilla reads such a tag
+    as zeros, so it is not a crash risk and not something to report.
+
+    """
+
+    if tag is None:
+        return None
+    try:
+        items = list(tag)
+    except TypeError:
+        return None
+    if len(items) != length:
+        return None
+    values = []
+    for item in items:
+        value = getattr(item, 'value', None)
+        if isinstance(value, bool) or not isinstance(value, numbers.Real):
+            return None
+        values.append(float(value))
+    return tuple(values)
 
 
 def get_str_from_traceback(ty, value, tb):

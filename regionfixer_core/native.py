@@ -115,17 +115,24 @@ class NativeRegionsetScanner:
                        considered with too many entities
      - remove_entities -- A boolean, remove the entities of chunks that hold
                           too many of them
+     - entity_position_bound -- None to skip the entity position check,
+                          otherwise the largest accepted absolute x/z
+                          coordinate. The native scanner does not read
+                          entity positions, so with the check on every
+                          region file that holds entities is handed back to
+                          the Python scanner.
 
     """
 
     def __init__(self, regionset, processes, entity_limit,
-                 remove_entities=False):
+                 remove_entities=False, entity_position_bound=None):
         self.data_structure = regionset
         self.regionset = regionset
         self.list_files_to_scan = regionset._get_list()
         self.processes = resolve_workers(processes)
         self.entity_limit = entity_limit
         self.remove_entities = remove_entities
+        self.entity_position_bound = entity_position_bound
 
         self._scanner = None
         self._by_path = {}
@@ -171,6 +178,12 @@ class NativeRegionsetScanner:
 
         path, region_status, chunks, fallback = result
         scanned = self._by_path[path]
+
+        if (fallback is None and self.entity_position_bound is not None and
+                any(num_entities for _x, _z, num_entities, _status in chunks)):
+            # Entity positions are not skimmed yet. Handing the file back is
+            # the same contract as any other shape the skimmer cannot model.
+            fallback = "entity position check needs the Python scanner"
 
         if fallback is not None:
             scanned = self._python_rescan(scanned, path, fallback)
@@ -239,7 +252,8 @@ class NativeRegionsetScanner:
         FALLBACK_LOG.append((path, reason))
         result = scan.scan_region_file(scanned,
                                        self.entity_limit,
-                                       self.remove_entities)
+                                       self.remove_entities,
+                                       self.entity_position_bound)
         if isinstance(result, tuple):
             # The Python scanner packs child process exceptions in a tuple.
             raise scan.ChildProcessException(result[0], result[1][0],

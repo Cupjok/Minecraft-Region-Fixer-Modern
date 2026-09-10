@@ -92,14 +92,15 @@ def write_level_dat(world_path):
     root.write_file(filename=os.path.join(world_path, "level.dat"))
 
 
-def scan_results(world_path, use_native, entity_limit=10):
+def scan_results(world_path, use_native, entity_limit=10, entity_position_bound=None):
     """Scan a world and return `{filename: (region_status, chunk_dict)}`."""
     previous = os.environ.get("REGIONFIXER_NO_NATIVE")
     os.environ["REGIONFIXER_NO_NATIVE"] = "0" if use_native else "1"
     try:
         worlds, _ = world.parse_paths([world_path])
         regionset = worlds[0].regionsets[0]
-        scanner = scan.make_regionset_scanner(regionset, 1, entity_limit, False)
+        scanner = scan.make_regionset_scanner(regionset, 1, entity_limit, False,
+                                              entity_position_bound)
         expected = "NativeRegionsetScanner" if use_native else "AsyncRegionsetScanner"
         assert type(scanner).__name__ == expected, type(scanner).__name__
         scanner.scan()
@@ -131,9 +132,9 @@ class NativeParityTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def assert_parity(self, entity_limit=10):
-        native_results = scan_results(self.tmp, True, entity_limit)
-        python_results = scan_results(self.tmp, False, entity_limit)
+    def assert_parity(self, entity_limit=10, entity_position_bound=None):
+        native_results = scan_results(self.tmp, True, entity_limit, entity_position_bound)
+        python_results = scan_results(self.tmp, False, entity_limit, entity_position_bound)
         self.assertEqual(set(native_results), set(python_results))
         for filename in native_results:
             self.assertEqual(native_results[filename], python_results[filename],
@@ -218,6 +219,34 @@ class NativeParityTests(unittest.TestCase):
         self.assertEqual(chunks[(1, 0)][1], 0)
         # The lz4 chunk is only readable by the Python scanner.
         self.assertGreater(len(native.FALLBACK_LOG), before)
+
+    def test_entity_position_check_falls_back_to_python(self):
+        bad = nbt.TAG_Compound()
+        bad.tags.append(nbt.TAG_String(name="id", value="minecraft:zombie"))
+        pos = nbt.TAG_List(name="Pos", type=nbt.TAG_Double)
+        pos.tags.extend(nbt.TAG_Double(v) for v in (1.8e16, 2.0e10, 1.4e14))
+        bad.tags.append(pos)
+        root = nbt.NBTFile(buffer=io.BytesIO(chunk_bytes(0, 0, entities=1)))
+        root["entities"].tags.append(bad)
+        buffer = io.BytesIO()
+        root.write_file(buffer=buffer)
+        payloads = {
+            (0, 0): (zlib.compress(buffer.getvalue()), 2),
+            (1, 0): (zlib.compress(chunk_bytes(1, 0)), 2),
+        }
+        write_region(os.path.join(self.region_dir, "r.0.0.mca"), 0, 0, payloads)
+        # A region file with no entities at all stays on the native path.
+        write_region(os.path.join(self.region_dir, "r.1.0.mca"), 1, 0,
+                     {(0, 0): (zlib.compress(chunk_bytes(32, 0, entities=0)), 2)})
+
+        before = list(native.FALLBACK_LOG)
+        results = self.assert_parity(entity_position_bound=30000000)
+        _, chunks = results["r.0.0.mca"]
+        self.assertEqual(chunks[(0, 0)], (2, 6))   # CHUNK_ENTITY_OUT_OF_BOUNDS
+        self.assertEqual(chunks[(1, 0)], (2, 0))
+        handed_back = [os.path.basename(p) for p, _ in native.FALLBACK_LOG[len(before):]]
+        self.assertIn("r.0.0.mca", handed_back)
+        self.assertNotIn("r.1.0.mca", handed_back)
 
 
 def lz4_java_stream(data):

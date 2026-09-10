@@ -41,7 +41,10 @@ from nbt.region import (ChunkDataError,
 from progressbar import ProgressBar, Bar, AdaptiveETA, SimpleProgress
 
 import regionfixer_core.constants as c
-from regionfixer_core.util import entitle
+from regionfixer_core.util import (entitle,
+                                   is_position_sane,
+                                   is_vector_finite,
+                                   read_nbt_vector)
 from regionfixer_core import world
 from regionfixer_core import native
 
@@ -126,7 +129,7 @@ def multiprocess_scan_data(data):
     """ Does the multithread stuff for scan_data """
     # Protect everything so an exception will be returned from the worker
     try:
-        result = scan_data(data)
+        result = scan_data(data, multiprocess_scan_data.position_bound)
         multiprocess_scan_data.q.put(result)
     except KeyboardInterrupt as e:
         raise e
@@ -143,8 +146,9 @@ def multiprocess_scan_regionfile(region_file):
         r = region_file
         entity_limit = multiprocess_scan_regionfile.entity_limit
         remove_entities = multiprocess_scan_regionfile.remove_entities
+        entity_position_bound = multiprocess_scan_regionfile.entity_position_bound
         # call the normal scan_region_file with this parameters
-        r = scan_region_file(r, entity_limit, remove_entities)
+        r = scan_region_file(r, entity_limit, remove_entities, entity_position_bound)
         multiprocess_scan_regionfile.q.put(r)
     except KeyboardInterrupt as e:
         raise e
@@ -168,6 +172,7 @@ def _mp_data_pool_init(d):
     assert isinstance(d, dict)
     assert 'queue' in d
     multiprocess_scan_data.q = d['queue']
+    multiprocess_scan_data.position_bound = d.get('position_bound')
 
 
 def _mp_regionset_pool_init(d):
@@ -190,6 +195,7 @@ def _mp_regionset_pool_init(d):
     multiprocess_scan_regionfile.q = d['queue']
     multiprocess_scan_regionfile.entity_limit = d['entity_limit']
     multiprocess_scan_regionfile.remove_entities = d['remove_entities']
+    multiprocess_scan_regionfile.entity_position_bound = d.get('entity_position_bound')
 
 
 class AsyncScanner:
@@ -394,12 +400,14 @@ class AsyncDataScanner(AsyncScanner):
     Inputs:
      - data_structure -- A DataFileSet from world.py containing the files to scan
      - processes -- An integer with the number of child processes to use
-    
+     - position_bound -- None to skip the player position check, otherwise
+                         the largest accepted absolute x/z coordinate
+
     """
 
-    def __init__(self, data_structure, processes):
+    def __init__(self, data_structure, processes, position_bound=None):
         scan_function = multiprocess_scan_data
-        init_args = {}
+        init_args = {'position_bound': position_bound}
         _mp_init_function = _mp_data_pool_init
 
         AsyncScanner.__init__(self, data_structure, processes, scan_function,
@@ -423,11 +431,13 @@ class AsyncRegionsetScanner(AsyncScanner):
      - remove_entities -- A boolean, defaults to False, to remove the entities whilel 
                          scanning. This is really handy because opening chunks with
                          too many entities for scanning can take minutes.
-    
+     - entity_position_bound -- None to skip the entity position check,
+                         otherwise the largest accepted absolute x/z coordinate
+
     """
 
     def __init__(self, regionset, processes, entity_limit,
-                 remove_entities=False):
+                 remove_entities=False, entity_position_bound=None):
         assert isinstance(regionset, world.DataSet)
 
         scan_function = multiprocess_scan_regionfile
@@ -438,6 +448,7 @@ class AsyncRegionsetScanner(AsyncScanner):
         init_args['processes'] = processes
         init_args['entity_limit'] = entity_limit
         init_args['remove_entities'] = remove_entities
+        init_args['entity_position_bound'] = entity_position_bound
 
         AsyncScanner.__init__(self, regionset, processes, scan_function,
                               init_args, _mp_init_function)
@@ -450,7 +461,7 @@ class AsyncRegionsetScanner(AsyncScanner):
 
 
 def make_regionset_scanner(regionset, processes, entity_limit,
-                           remove_entities=False):
+                           remove_entities=False, entity_position_bound=None):
     """ Return the fastest available scanner for a RegionSet.
 
     The native scanner is used when it has been built and the user has not
@@ -460,9 +471,10 @@ def make_regionset_scanner(regionset, processes, entity_limit,
 
     if native.available():
         return native.NativeRegionsetScanner(regionset, processes,
-                                             entity_limit, remove_entities)
+                                             entity_limit, remove_entities,
+                                             entity_position_bound)
     return AsyncRegionsetScanner(regionset, processes, entity_limit,
-                                 remove_entities)
+                                 remove_entities, entity_position_bound)
 
 
 class AsyncWorldRegionScanner:
@@ -484,12 +496,13 @@ class AsyncWorldRegionScanner:
     """
 
     def __init__(self, world_obj, processes, entity_limit,
-                 remove_entities=False):
+                 remove_entities=False, entity_position_bound=None):
 
         self._world_obj = world_obj
         self.processes = processes
         self.entity_limit = entity_limit
         self.remove_entities = remove_entities
+        self.entity_position_bound = entity_position_bound
 
         self.regionsets = copy(world_obj.regionsets)
 
@@ -515,7 +528,8 @@ class AsyncWorldRegionScanner:
         cr = make_regionset_scanner(self.regionsets.pop(0),
                                     self.processes,
                                     self.entity_limit,
-                                    self.remove_entities)
+                                    self.remove_entities,
+                                    self.entity_position_bound)
         self._current_regionset = cr
         cr.scan()
 
@@ -660,7 +674,8 @@ def console_scan_loop(scanners, scan_titles, verbose):
 
 
 def console_scan_world(world_obj, processes, entity_limit, remove_entities,
-                       verbose):
+                       verbose, entity_position_bound=None,
+                       player_position_bound=None):
     """ Scans a world folder prints status to console.
 
     Inputs:
@@ -668,10 +683,13 @@ def console_scan_world(world_obj, processes, entity_limit, remove_entities,
      - processes -- An integer with the number of child processes to use
      - entity_limit -- An integer, threshold of entities for a chunk to be considered
                      with too many entities
-     - remove_entities -- A boolean, defaults to False, to remove the entities whilel 
+     - remove_entities -- A boolean, defaults to False, to remove the entities whilel
                          scanning. This is really handy because opening chunks with
                          too many entities for scanning can take minutes.
      - verbose -- Boolean, if true it will print a line per scanned region file.
+     - entity_position_bound -- None to skip the entity position check, otherwise
+                         the largest accepted absolute x/z coordinate.
+     - player_position_bound -- Same, for the player files.
 
     """
 
@@ -704,10 +722,11 @@ def console_scan_world(world_obj, processes, entity_limit, remove_entities,
             print("[WARNING!]: \'level.dat\' is corrupted with the following error/s:")
             print("\t {0}".format(c.DATAFILE_STATUS_TEXT[w.scanned_level.status]))
 
-    ps = AsyncDataScanner(w.players, processes)
-    ops = AsyncDataScanner(w.old_players, processes)
+    ps = AsyncDataScanner(w.players, processes, player_position_bound)
+    ops = AsyncDataScanner(w.old_players, processes, player_position_bound)
     ds = AsyncDataScanner(w.data_files, processes)
-    ws = AsyncWorldRegionScanner(w, processes, entity_limit, remove_entities)
+    ws = AsyncWorldRegionScanner(w, processes, entity_limit, remove_entities,
+                                 entity_position_bound)
 
     scanners = [ps, ops, ds, ws]
 
@@ -719,7 +738,8 @@ def console_scan_world(world_obj, processes, entity_limit, remove_entities,
     w.scanned = True
 
 
-def console_scan_regionset(regionset, processes, entity_limit, remove_entities, verbose):
+def console_scan_regionset(regionset, processes, entity_limit, remove_entities, verbose,
+                           entity_position_bound=None):
     """ Scan a regionset printing status to console.
 
     Inputs:
@@ -735,18 +755,50 @@ def console_scan_regionset(regionset, processes, entity_limit, remove_entities, 
     """
 
     rs = make_regionset_scanner(regionset, processes, entity_limit,
-                                remove_entities)
+                                remove_entities, entity_position_bound)
     scanners = [rs]
     titles = [entitle("Scanning separate region files", 0)]
     console_scan_loop(scanners, titles, verbose)
     regionset.scanned = True
 
 
-def scan_data(scanned_dat_file):
+def check_player_position(scanned_dat_file, nbt_file, position_bound):
+    """ Mark a parsed player file with an impossible position.
+
+    Inputs:
+     - scanned_dat_file -- ScannedDataFile object from world.py, already OK.
+     - nbt_file -- The parsed NBTFile of that player.
+     - position_bound -- Largest accepted absolute x/z coordinate.
+
+    Pos, Motion and Dimension are copied to the ScannedDataFile for the
+    report. The file becomes DATAFILE_INVALID_POSITION when Pos fails
+    is_position_sane() or Motion is not finite. Vanilla already ignores an
+    oversized but finite Motion, so only NaN and infinity count there.
+
+    """
+
+    s = scanned_dat_file
+    if 'Pos' not in nbt_file:
+        # Not a player file (or a very odd one); nothing to check.
+        return
+    s.position = read_nbt_vector(nbt_file['Pos'])
+    s.motion = read_nbt_vector(nbt_file['Motion']) if 'Motion' in nbt_file else None
+    if 'Dimension' in nbt_file:
+        s.dimension = getattr(nbt_file['Dimension'], 'value', None)
+    bad_pos = (s.position is not None and
+               not is_position_sane(*s.position, max_abs_xz=position_bound))
+    bad_motion = s.motion is not None and not is_vector_finite(s.motion)
+    if bad_pos or bad_motion:
+        s.status = c.DATAFILE_INVALID_POSITION
+
+
+def scan_data(scanned_dat_file, position_bound=None):
     """ Try to parse the nbt data file, and fill the scanned object.
 
     Inputs:
      - scanned_dat_file -- ScannedDataFile object from world.py.
+     - position_bound -- None, or the largest accepted absolute x/z player
+                         coordinate to also run check_player_position().
 
     If something is wrong it will return a tuple with useful info
     to debug the problem.
@@ -763,10 +815,12 @@ def scan_data(scanned_dat_file):
             # These map-id counter files are raw/uncompressed NBT. Open them
             # in binary mode and pass a buffer so NBTFile does not try gzip.
             with open(s.path, 'rb') as f:
-                _ = nbt.NBTFile(buffer=f)
+                nbt_file = nbt.NBTFile(buffer=f)
         else:
-            _ = nbt.NBTFile(filename=s.path)
+            nbt_file = nbt.NBTFile(filename=s.path)
         s.status = c.DATAFILE_OK
+        if position_bound is not None:
+            check_player_position(s, nbt_file, position_bound)
     except MalformedFileError:
         s.status = c.DATAFILE_UNREADABLE
     except IOError:
@@ -787,21 +841,25 @@ def scan_data(scanned_dat_file):
     return s
 
 
-def scan_region_file(scanned_regionfile_obj, entity_limit, remove_entities):
+def scan_region_file(scanned_regionfile_obj, entity_limit, remove_entities,
+                     entity_position_bound=None):
     """ Scan a region file filling the ScannedRegionFile object
 
     Inputs:
      - scanned_regionfile_obj -- ScannedRegionfile object from world.py that will be scanned
      - entity_limit -- An integer, threshold of entities for a chunk to be considered
                      with too many entities
-     - remove_entities -- A boolean, defaults to False, to remove the entities while 
+     - remove_entities -- A boolean, defaults to False, to remove the entities while
                          scanning. This is really handy because opening chunks with
                          too many entities for scanning can take minutes.
+     - entity_position_bound -- None to skip the entity position check, otherwise
+                     the largest accepted absolute x/z coordinate.
 
     """
 
     try:
         r = scanned_regionfile_obj
+        r.bad_entities = {}
 
         # try to open the file and see if we can parse the header
         try:
@@ -831,7 +889,8 @@ def scan_region_file(scanned_regionfile_obj, entity_limit, remove_entities):
                 chunk, tup = scan_chunk(region_file,
                                       (x, z),
                                       g_coords,
-                                      entity_limit)
+                                      entity_limit,
+                                      entity_position_bound)
                 if tup:
                     r[(x, z)] = tup
                 else:
@@ -860,6 +919,19 @@ def scan_region_file(scanned_regionfile_obj, entity_limit, remove_entities):
                         # ~ archivo = open(name,'w')
                         # ~ archivo.write(pretty_tree)
                         pass
+                elif tup[c.TUPLE_STATUS] == c.CHUNK_ENTITY_OUT_OF_BOUNDS:
+                    num_entities = tup[c.TUPLE_NUM_ENTITIES]
+                    if remove_entities and num_entities is not None and num_entities > entity_limit:
+                        # The chunk is also crowded. --delete-entities
+                        # empties it, which removes the bad entities as well.
+                        world.delete_entities(region_file, x, z)
+                        print(("Deleted {0} entities in chunk"
+                               " ({1},{2}) of the region file: {3}").format(num_entities, x, z, r.filename))
+                        r[(x, z)] = (0, c.CHUNK_OK)
+                    else:
+                        bad = world.find_bad_entities(world.get_chunk_entity_list(chunk),
+                                                      entity_position_bound)
+                        r.bad_entities[(x, z)] = [(entity_id, pos) for _i, entity_id, pos in bad]
                 elif tup[c.TUPLE_STATUS] == c.CHUNK_CORRUPTED:
                     pass
                 elif tup[c.TUPLE_STATUS] == c.CHUNK_WRONG_LOCATED:
@@ -906,7 +978,8 @@ def scan_region_file(scanned_regionfile_obj, entity_limit, remove_entities):
         return r
 
 
-def scan_chunk(region_file, coords, global_coords, entity_limit):
+def scan_chunk(region_file, coords, global_coords, entity_limit,
+               entity_position_bound=None):
     """ Scans a chunk returning its status and number of entities.
 
     Keywords arguments:
@@ -914,6 +987,13 @@ def scan_chunk(region_file, coords, global_coords, entity_limit):
     coords -- tuple containing the local (region) coordinates of the chunk
     global_coords -- tuple containing the global (world) coordinates of the chunk
     entity_limit -- the number of entities that is considered to be too many
+    entity_position_bound -- None to skip the entity position check, otherwise
+                             the largest accepted absolute x/z coordinate
+
+    A chunk has a single status. When several apply the order is: wrong
+    located, entity out of bounds, too many entities. An out of bounds entity
+    is what crashes a server, so it wins over a crowded chunk; the entity count
+    is still in the tuple and the log shows it for both statuses.
 
     Return:
     chunk -- as a nbt file
@@ -961,6 +1041,8 @@ def scan_chunk(region_file, coords, global_coords, entity_limit):
                 if data_coords != global_coords:
                     # wrong located chunk
                     status = c.CHUNK_WRONG_LOCATED
+                elif _has_bad_entities(chunk, entity_position_bound):
+                    status = c.CHUNK_ENTITY_OUT_OF_BOUNDS
                 elif num_entities != None and num_entities > el:
                     # too many entities in the chunk
                     status = c.CHUNK_TOO_MANY_ENTITIES
@@ -1014,6 +1096,8 @@ def scan_chunk(region_file, coords, global_coords, entity_limit):
             if data_coords != global_coords:
                 # wrong located chunk
                 status = c.CHUNK_WRONG_LOCATED
+            elif _has_bad_entities(chunk, entity_position_bound):
+                status = c.CHUNK_ENTITY_OUT_OF_BOUNDS
             elif num_entities > el:
                 # too many entities in the chunk
                 status = c.CHUNK_TOO_MANY_ENTITIES
@@ -1069,6 +1153,15 @@ def scan_chunk(region_file, coords, global_coords, entity_limit):
         num_entities = None
 
     return chunk, (num_entities, status) if status != c.CHUNK_NOT_CREATED else None
+
+
+def _has_bad_entities(chunk, entity_position_bound):
+    """ True when the position check is on and an entity of chunk fails it. """
+
+    if entity_position_bound is None:
+        return False
+    return bool(world.find_bad_entities(world.get_chunk_entity_list(chunk),
+                                        entity_position_bound))
 
 
 if __name__ == '__main__':

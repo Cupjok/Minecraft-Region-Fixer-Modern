@@ -47,6 +47,9 @@ CHUNK_WRONG_LOCATED = 2
 CHUNK_TOO_MANY_ENTITIES = 3
 CHUNK_SHARED_OFFSET = 4
 CHUNK_MISSING_ENTITIES_TAG = 5
+# At least one entity has a NaN, infinite or absurdly large Pos. Only
+# reported when the entity position check is enabled.
+CHUNK_ENTITY_OUT_OF_BOUNDS = 6
 
 # Chunk statuses
 CHUNK_STATUSES = [CHUNK_NOT_CREATED,
@@ -55,14 +58,16 @@ CHUNK_STATUSES = [CHUNK_NOT_CREATED,
                   CHUNK_WRONG_LOCATED,
                   CHUNK_TOO_MANY_ENTITIES,
                   CHUNK_SHARED_OFFSET,
-                  CHUNK_MISSING_ENTITIES_TAG]
+                  CHUNK_MISSING_ENTITIES_TAG,
+                  CHUNK_ENTITY_OUT_OF_BOUNDS]
 
 # Status that are considered problems
 CHUNK_PROBLEMS = [CHUNK_CORRUPTED,
                   CHUNK_WRONG_LOCATED,
                   CHUNK_TOO_MANY_ENTITIES,
                   CHUNK_SHARED_OFFSET,
-                  CHUNK_MISSING_ENTITIES_TAG]
+                  CHUNK_MISSING_ENTITIES_TAG,
+                  CHUNK_ENTITY_OUT_OF_BOUNDS]
 
 # Text describing each chunk status
 CHUNK_STATUS_TEXT = {CHUNK_NOT_CREATED: "Not created",
@@ -71,7 +76,8 @@ CHUNK_STATUS_TEXT = {CHUNK_NOT_CREATED: "Not created",
                      CHUNK_WRONG_LOCATED: "Wrong located",
                      CHUNK_TOO_MANY_ENTITIES: "Too many entities",
                      CHUNK_SHARED_OFFSET: "Sharing offset",
-                     CHUNK_MISSING_ENTITIES_TAG: "Missing Entities tag"
+                     CHUNK_MISSING_ENTITIES_TAG: "Missing Entities tag",
+                     CHUNK_ENTITY_OUT_OF_BOUNDS: "Entity out of bounds"
                      }
 
 # arguments used in the options
@@ -79,7 +85,8 @@ CHUNK_PROBLEMS_ARGS = {CHUNK_CORRUPTED: 'corrupted',
                        CHUNK_WRONG_LOCATED: 'wrong-located',
                        CHUNK_TOO_MANY_ENTITIES: 'entities',
                        CHUNK_SHARED_OFFSET: 'shared-offset',
-                       CHUNK_MISSING_ENTITIES_TAG: 'missing-tag'
+                       CHUNK_MISSING_ENTITIES_TAG: 'missing-tag',
+                       CHUNK_ENTITY_OUT_OF_BOUNDS: 'entity-position'
                        }
 
 # used in some places where there is less space
@@ -87,7 +94,8 @@ CHUNK_PROBLEMS_ABBR = {CHUNK_CORRUPTED: 'c',
                        CHUNK_WRONG_LOCATED: 'w',
                        CHUNK_TOO_MANY_ENTITIES: 'tme',
                        CHUNK_SHARED_OFFSET: 'so',
-                       CHUNK_MISSING_ENTITIES_TAG: 'mt'
+                       CHUNK_MISSING_ENTITIES_TAG: 'mt',
+                       CHUNK_ENTITY_OUT_OF_BOUNDS: 'eob'
                        }
 
 # Dictionary with possible solutions for the chunks problems,
@@ -97,15 +105,21 @@ CHUNK_SOLUTION_REMOVE = 51
 CHUNK_SOLUTION_REPLACE = 52
 CHUNK_SOLUTION_REMOVE_ENTITIES = 53
 CHUNK_SOLUTION_RELOCATE_USING_DATA = 54
+# Remove only the entities that failed the position check.
+CHUNK_SOLUTION_REMOVE_BAD_ENTITIES = 55
 
+# CHUNK_ENTITY_OUT_OF_BOUNDS deliberately has no CHUNK_SOLUTION_REMOVE: one
+# broken mob is no reason to delete a whole chunk of terrain.
 CHUNK_PROBLEMS_SOLUTIONS = {CHUNK_CORRUPTED: [CHUNK_SOLUTION_REMOVE, CHUNK_SOLUTION_REPLACE],
                        CHUNK_WRONG_LOCATED: [CHUNK_SOLUTION_REMOVE, CHUNK_SOLUTION_REPLACE, CHUNK_SOLUTION_RELOCATE_USING_DATA],
                        CHUNK_TOO_MANY_ENTITIES: [CHUNK_SOLUTION_REMOVE_ENTITIES, CHUNK_SOLUTION_REPLACE],
                        CHUNK_SHARED_OFFSET: [CHUNK_SOLUTION_REMOVE, CHUNK_SOLUTION_REPLACE],
-                       CHUNK_MISSING_ENTITIES_TAG: [CHUNK_SOLUTION_REMOVE, CHUNK_SOLUTION_REPLACE]}
+                       CHUNK_MISSING_ENTITIES_TAG: [CHUNK_SOLUTION_REMOVE, CHUNK_SOLUTION_REPLACE],
+                       CHUNK_ENTITY_OUT_OF_BOUNDS: [CHUNK_SOLUTION_REMOVE_BAD_ENTITIES, CHUNK_SOLUTION_REPLACE]}
 
 # chunk problems that can be fixed (so they don't need to be removed or replaced)
-FIXABLE_CHUNK_PROBLEMS = [CHUNK_CORRUPTED, CHUNK_MISSING_ENTITIES_TAG, CHUNK_WRONG_LOCATED]
+FIXABLE_CHUNK_PROBLEMS = [CHUNK_CORRUPTED, CHUNK_MISSING_ENTITIES_TAG, CHUNK_WRONG_LOCATED,
+                          CHUNK_ENTITY_OUT_OF_BOUNDS]
 
 # list with problem, status-text, problem arg tuples
 CHUNK_PROBLEMS_ITERATOR = []
@@ -188,35 +202,46 @@ for problem in REGION_PROBLEMS:
 # Used to mark the status of data files:
 DATAFILE_OK = 200
 DATAFILE_UNREADABLE = 201
+# A player file whose Pos is NaN, infinite or absurdly large, or whose Motion
+# is not finite. Only reported when the player position check is enabled.
+DATAFILE_INVALID_POSITION = 202
 
 # Data files statuses
 DATAFILE_STATUSES = [DATAFILE_OK,
-                     DATAFILE_UNREADABLE]
+                     DATAFILE_UNREADABLE,
+                     DATAFILE_INVALID_POSITION]
 
 # Status that are considered problems
-DATAFILE_PROBLEMS = [DATAFILE_UNREADABLE]
+DATAFILE_PROBLEMS = [DATAFILE_UNREADABLE,
+                     DATAFILE_INVALID_POSITION]
 
 # Text describing each chunk status
 DATAFILE_STATUS_TEXT = {DATAFILE_OK: "OK",
-                        DATAFILE_UNREADABLE: "The data file cannot be read"
+                        DATAFILE_UNREADABLE: "The data file cannot be read",
+                        DATAFILE_INVALID_POSITION: "Invalid player position"
                         }
 
 # arguments used in the options
 DATAFILE_PROBLEMS_ARGS = {DATAFILE_OK: 'OK',
-                          DATAFILE_UNREADABLE: 'unreadable'
+                          DATAFILE_UNREADABLE: 'unreadable',
+                          DATAFILE_INVALID_POSITION: 'player-position'
                           }
 
 # used in some places where there is less space
 DATAFILE_PROBLEM_ABBR = {DATAFILE_OK: 'ok',
-                         DATAFILE_UNREADABLE: 'ur'
+                         DATAFILE_UNREADABLE: 'ur',
+                         DATAFILE_INVALID_POSITION: 'ipp'
                          }
 
 # Dictionary with possible solutions for the chunks problems,
 # used to create options dynamically
 # The possible solutions right now are:
 DATAFILE_SOLUTION_REMOVE = 251
+# Move the player to the world spawn and zero their Motion.
+DATAFILE_SOLUTION_RESET_POSITION = 252
 
-DATAFILE_PROBLEMS_SOLUTIONS = {DATAFILE_UNREADABLE: [DATAFILE_SOLUTION_REMOVE]}
+DATAFILE_PROBLEMS_SOLUTIONS = {DATAFILE_UNREADABLE: [DATAFILE_SOLUTION_REMOVE],
+                               DATAFILE_INVALID_POSITION: [DATAFILE_SOLUTION_RESET_POSITION]}
 
 # list with problem, status-text, problem arg tuples
 DATAFILE_PROBLEMS_ITERATOR = []

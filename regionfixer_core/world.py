@@ -34,6 +34,10 @@ import nbt.nbt as nbt
 from nbt.nbt import TAG_List
 
 import regionfixer_core.constants as c
+from regionfixer_core.util import (DEFAULT_POSITION_BOUND_XZ,
+                                   is_position_sane,
+                                   is_vector_finite,
+                                   read_nbt_vector)
 
 
 def _summary_table(headers, rows):
@@ -75,6 +79,16 @@ def _plural(value, singular, plural=None):
     return singular if value == 1 else plural
 
 
+def _fmt_vector(values):
+    """Format a Pos/Motion tuple compactly; huge values use exponent form."""
+    if values is None:
+        return "missing"
+    return "[" + ", ".join("{0:.6g}".format(v) for v in values) + "]"
+
+# How many offending entities/players to list per chunk or report section.
+_MAX_LISTED = 10
+
+
 
 class InvalidFileName(IOError):
     """ Exception raised when a filename is wrong. """
@@ -98,6 +112,11 @@ class ScannedDataFile:
             self.filename = None
         # The status of the region file.
         self.status = None
+        # Filled by the player position check: Pos and Motion as tuples and
+        # the raw Dimension value (a string today, an integer in old worlds).
+        self.position = None
+        self.motion = None
+        self.dimension = None
 
     def __str__(self):
         text = "NBT file:" + str(self.filename) + "\n"
@@ -105,9 +124,21 @@ class ScannedDataFile:
         return text
 
     @property
+    def uuid(self):
+        """ Player UUID taken from the file name, or None. """
+        if not self.filename or not self.filename.endswith(".dat"):
+            return None
+        return self.filename[:-len(".dat")]
+
+    @property
     def oneliner_status(self):
         """ One line describing the status of the file. """
-        return "File: \"" + self.filename + "\"; status: " + c.DATAFILE_STATUS_TEXT[self.status]
+        text = "File: \"" + self.filename + "\"; status: " + c.DATAFILE_STATUS_TEXT[self.status]
+        if self.status == c.DATAFILE_INVALID_POSITION:
+            text += "; UUID: {0}; Pos: {1}; Motion: {2}; Dimension: {3}".format(
+                self.uuid, _fmt_vector(self.position), _fmt_vector(self.motion),
+                self.dimension if self.dimension is not None else "unknown")
+        return text
 
 
 class ScannedChunk:
@@ -148,6 +179,10 @@ class ScannedRegionFile:
         self._counts = {}
         for s in c.CHUNK_STATUSES:
             self._counts[s] = 0
+
+        # {local coords: [(entity_id, pos), ...]} for chunks with the status
+        # CHUNK_ENTITY_OUT_OF_BOUNDS, so the log can say which entity is bad.
+        self.bad_entities = {}
 
         # time when the scan for this file finished
         self.scan_time = scanned_time
@@ -345,6 +380,15 @@ class ScannedRegionFile:
                 text += " | +-Status: {0}\n".format(c.CHUNK_STATUS_TEXT[status])
                 if self[ck][c.TUPLE_STATUS] == c.CHUNK_TOO_MANY_ENTITIES:
                     text += " | +-No. entities: {0}\n".format(self[ck][c.TUPLE_NUM_ENTITIES])
+                elif self[ck][c.TUPLE_STATUS] == c.CHUNK_ENTITY_OUT_OF_BOUNDS:
+                    # The entity count is shown too, a crowded chunk reports
+                    # this status first and would otherwise hide it.
+                    text += " | +-No. entities: {0}\n".format(self[ck][c.TUPLE_NUM_ENTITIES])
+                    bad = self.bad_entities.get(ck, [])
+                    for entity_id, pos in bad[:_MAX_LISTED]:
+                        text += " | +-Bad entity: {0} at Pos {1}\n".format(entity_id, _fmt_vector(pos))
+                    if len(bad) > _MAX_LISTED:
+                        text += " | +-... and {0} more\n".format(len(bad) - _MAX_LISTED)
                 text += " |\n"
 
         return text
@@ -375,13 +419,19 @@ class ScannedRegionFile:
 
         return counter
 
-    def fix_problematic_chunks(self, status):
+    def fix_problematic_chunks(self, status, entity_limit=None, position_bound=None):
         """ This fixes problems in chunks that can be somehow fixed.
-        
+
         Inputs:
-         - status -- Integer with the status of the chunks to fix. See 
+         - status -- Integer with the status of the chunks to fix. See
                     FIXABLE_CHUNK_PROBLEMS in constants.py
-        
+         - entity_limit -- Integer or None. After removing out of bounds
+                    entities, a chunk still above this limit is marked as
+                    CHUNK_TOO_MANY_ENTITIES instead of OK.
+         - position_bound -- Largest accepted absolute x/z entity coordinate,
+                    None for the default. Only used for
+                    CHUNK_ENTITY_OUT_OF_BOUNDS.
+
         Return:
          - counter -- An integer with the amount of fixed chunks.
         
@@ -404,6 +454,8 @@ class ScannedRegionFile:
         # of them are mandatory.
         
         assert(status in c.FIXABLE_CHUNK_PROBLEMS)
+        if status == c.CHUNK_ENTITY_OUT_OF_BOUNDS:
+            return self._fix_out_of_bounds_entities(entity_limit, position_bound)
         counter = 0
         bad_chunks = self.list_chunks(status)
         for ck in bad_chunks:
@@ -499,6 +551,40 @@ class ScannedRegionFile:
                 self[data_l_coords]= (0           , c.CHUNK_OK)
                 counter += 1
 
+        return counter
+
+    def _fix_out_of_bounds_entities(self, entity_limit, position_bound):
+        """ Remove the out of bounds entities of every CHUNK_ENTITY_OUT_OF_BOUNDS chunk.
+
+        Return:
+         - counter -- Integer with the number of chunks fixed.
+
+        """
+
+        counter = 0
+        bad_chunks = self.list_chunks(c.CHUNK_ENTITY_OUT_OF_BOUNDS)
+        if not bad_chunks:
+            return counter
+        region_file = region.RegionFile(self.path)
+        try:
+            for global_coords, _status_tuple in bad_chunks:
+                local_coords = _get_local_chunk_coords(*global_coords)
+                removed, remaining = remove_bad_entities(region_file, local_coords[0],
+                                                         local_coords[1], position_bound)
+                for entity_id, pos in removed:
+                    print("Removed {0} at Pos {1} from chunk {2},{3} in region file {4}.".format(
+                        entity_id, _fmt_vector(pos), local_coords[0], local_coords[1],
+                        join(self.folder, self.filename)))
+                # Do not let the repair hide a crowded chunk.
+                if entity_limit is not None and remaining > entity_limit:
+                    new_status = c.CHUNK_TOO_MANY_ENTITIES
+                else:
+                    new_status = c.CHUNK_OK
+                self[local_coords] = (remaining, new_status)
+                self.bad_entities.pop(local_coords, None)
+                counter += 1
+        finally:
+            region_file.close()
         return counter
 
     def remove_entities(self):
@@ -1041,13 +1127,14 @@ class RegionSet(DataSet):
 
         return counter
 
-    def fix_problematic_chunks(self, status):
+    def fix_problematic_chunks(self, status, entity_limit=None, position_bound=None):
         """ Try to fix all the chunks with the given problem.
 
         Inputs:
          - status -- Integer with the chunk status to fix. See c.CHUNK_STATUSES in constants.py
                      for a list of possible statuses.
-        
+         - entity_limit, position_bound -- See ScannedRegionFile.fix_problematic_chunks().
+
         Return:
          - counter -- Integer with the number of chunks fixed.
         """
@@ -1057,7 +1144,7 @@ class RegionSet(DataSet):
             dim_name = self.get_name()
             print('Repairing chunks in regionset \"{0}\":'.format(dim_name if dim_name else "selected region files"))
             for r in list(self._set.keys()):
-                counter += self._set[r].fix_problematic_chunks(status)
+                counter += self._set[r].fix_problematic_chunks(status, entity_limit, position_bound)
             print("    Repaired {0} chunks in this regionset.\n".format(counter))
 
         return counter
@@ -1439,9 +1526,10 @@ class World:
             counter += count
         return counter
 
-    def replace_problematic_chunks(self, backup_worlds, status, entity_limit, delete_entities):
+    def replace_problematic_chunks(self, backup_worlds, status, entity_limit, delete_entities,
+                                   entity_position_bound=None):
         """ Replaces problematic chunks using backups.
-        
+
         Inputs:
          - backup_worlds -- A list of World objects to use as backups. Backup worlds will be used
                             in a ordered way.
@@ -1450,7 +1538,9 @@ class World:
          - entity_limit -- The threshold to consider a chunk with the status TOO_MANY_ENTITIES.
          - delete_entities -- Boolean indicating if the chunks with too_many_entities should have
                              their entities removed.
-        
+         - entity_position_bound -- None, or the x/z bound of the entity position check. When
+                             set, backup chunks holding out of bounds entities are not used.
+
         Return:
          - counter -- An integer with the number of chunks replaced.
 
@@ -1501,7 +1591,8 @@ class World:
                                 r = scanned_regions[cache_key]
                             except KeyError:
                                 from .scan import scan_region_file
-                                r = scan_region_file(ScannedRegionFile(backup_region_path), entity_limit, delete_entities)
+                                r = scan_region_file(ScannedRegionFile(backup_region_path), entity_limit, delete_entities,
+                                                     entity_position_bound)
                                 scanned_regions[cache_key] = r
                             try:
                                 status_tuple = r[local_coords]
@@ -1557,13 +1648,14 @@ class World:
             counter += regionset.remove_problematic_chunks(status)
         return counter
 
-    def fix_problematic_chunks(self, status):
+    def fix_problematic_chunks(self, status, entity_limit=None, position_bound=None):
         """ Try to fix all the chunks with the given status.
 
         Inputs:
-         - status -- Integer with the chunk status to remove. See CHUNK_STATUSES in constants.py 
+         - status -- Integer with the chunk status to remove. See CHUNK_STATUSES in constants.py
                      for a list of possible statuses.
-        
+         - entity_limit, position_bound -- See ScannedRegionFile.fix_problematic_chunks().
+
         Return:
          - counter -- Integer with the number of chunks fixed.
 
@@ -1573,7 +1665,94 @@ class World:
 
         counter = 0
         for regionset in self.regionsets:
-            counter += regionset.fix_problematic_chunks(status)
+            counter += regionset.fix_problematic_chunks(status, entity_limit, position_bound)
+        return counter
+
+    def get_spawn(self):
+        """ Return the world spawn from level.dat as ((x, y, z), dimension).
+
+        Return:
+         - pos -- Tuple of three floats. (0.0, 64.0, 0.0) when level.dat has
+                  no usable spawn.
+         - dimension -- The spawn dimension id, or None if level.dat does not
+                        say (before 1.21.9 the spawn was always the overworld).
+
+        Since 1.21.9 the spawn is a `spawn` compound holding `pos` and
+        `dimension`; older worlds use SpawnX/SpawnY/SpawnZ.
+
+        """
+
+        data = self.level_data
+        try:
+            if data is not None and "spawn" in data:
+                spawn = data["spawn"]
+                pos = [float(v) for v in spawn["pos"].value]
+                dimension = spawn["dimension"].value if "dimension" in spawn else None
+                if len(pos) == 3:
+                    return tuple(pos), dimension
+            if data is not None and all(k in data for k in ("SpawnX", "SpawnY", "SpawnZ")):
+                return (float(data["SpawnX"].value), float(data["SpawnY"].value),
+                        float(data["SpawnZ"].value)), None
+        except (KeyError, TypeError, ValueError, AttributeError):
+            pass
+        return (0.0, 64.0, 0.0), None
+
+    def list_invalid_player_files(self):
+        """ Return every scanned player file with the status DATAFILE_INVALID_POSITION. """
+
+        return [f for s in (self.players, self.old_players) for f in s._get_list()
+                if f.status == c.DATAFILE_INVALID_POSITION]
+
+    def fix_player_positions(self):
+        """ Move every player with an invalid position to the world spawn.
+
+        Return:
+         - counter -- Integer with the number of player files fixed.
+
+        For each file a copy of the original is kept next to it as
+        `<file>.bak` (or `<file>.bak.N` if that name is taken) before
+        anything is written. Pos becomes the spawn from level.dat, Motion and
+        the fall distance become zero and, when the spawn dimension is known
+        or the file uses the string form, Dimension is set to the spawn
+        dimension so the player is not dropped at overworld coordinates in
+        another dimension.
+
+        """
+
+        spawn, spawn_dimension = self.get_spawn()
+        counter = 0
+        for scanned in self.list_invalid_player_files():
+            backup_path = _free_backup_path(scanned.path)
+            copy(scanned.path, backup_path)
+            player = nbt.NBTFile(filename=scanned.path)
+            pos = nbt.TAG_List(name="Pos", type=nbt.TAG_Double)
+            pos.tags.extend(nbt.TAG_Double(v) for v in spawn)
+            player["Pos"] = pos
+            motion = nbt.TAG_List(name="Motion", type=nbt.TAG_Double)
+            motion.tags.extend(nbt.TAG_Double(0.0) for _ in range(3))
+            player["Motion"] = motion
+            # Falling through the broken position may have built up a lethal
+            # fall distance. The tag was renamed in 1.21.5.
+            if "FallDistance" in player:
+                player["FallDistance"] = nbt.TAG_Float(0.0)
+            if "fall_distance" in player:
+                player["fall_distance"] = nbt.TAG_Double(0.0)
+            if "Dimension" in player:
+                current = player["Dimension"]
+                if isinstance(current, nbt.TAG_String):
+                    player["Dimension"] = nbt.TAG_String(spawn_dimension or "minecraft:overworld")
+                elif spawn_dimension is None:
+                    # Integer ids in pre-1.16 files; 0 is the overworld.
+                    player["Dimension"] = nbt.TAG_Int(0)
+            player.write_file(filename=scanned.path)
+
+            print("Reset player {0}: Pos {1} -> {2} (original saved as {3})".format(
+                scanned.uuid, _fmt_vector(scanned.position), _fmt_vector(spawn),
+                split(backup_path)[1]))
+            scanned.status = c.DATAFILE_OK
+            scanned.position = spawn
+            scanned.motion = (0.0, 0.0, 0.0)
+            counter += 1
         return counter
 
     def replace_problematic_regions(self, backup_worlds, status, entity_limit, delete_entities):
@@ -1710,14 +1889,17 @@ class World:
         chunk_problem_total = _problem_total(chunk_counts, c.CHUNK_PROBLEMS)
         region_problem_total = _problem_total(region_counts, c.REGION_PROBLEMS)
 
+        # "bad" here means unreadable; invalid player positions are counted
+        # separately so the "unreadable" labels below stay accurate.
         uuid_total = len(self.players)
-        uuid_bad = sum(1 for item in self.players._get_list() if item.status in c.DATAFILE_PROBLEMS)
+        uuid_bad = sum(1 for item in self.players._get_list() if item.status == c.DATAFILE_UNREADABLE)
         old_player_total = len(self.old_players)
-        old_player_bad = sum(1 for item in self.old_players._get_list() if item.status in c.DATAFILE_PROBLEMS)
+        old_player_bad = sum(1 for item in self.old_players._get_list() if item.status == c.DATAFILE_UNREADABLE)
         data_total = len(self.data_files)
         data_bad = sum(1 for item in self.data_files._get_list() if item.status in c.DATAFILE_PROBLEMS)
         level_bad = 1 if self.scanned_level.status in c.DATAFILE_PROBLEMS else 0
-        data_problem_total = uuid_bad + old_player_bad + data_bad + level_bad
+        invalid_players = self.list_invalid_player_files()
+        data_problem_total = uuid_bad + old_player_bad + data_bad + level_bad + len(invalid_players)
         total_problems = chunk_problem_total + region_problem_total + data_problem_total
 
         modern_layout = False
@@ -1807,8 +1989,15 @@ class World:
             ("Unreadable UUID player files", _fmt_count(uuid_bad)),
             ("Unreadable old player files", _fmt_count(old_player_bad)),
             ("Unreadable world/data files", _fmt_count(data_bad)),
+            ("Invalid player positions", _fmt_count(len(invalid_players))),
             ("Total data-file problems", _fmt_count(data_problem_total)),
         ]))
+        for scanned in invalid_players[:_MAX_LISTED]:
+            lines.append("  ! {0}  Pos {1}  Dimension {2}".format(
+                scanned.uuid, _fmt_vector(scanned.position),
+                scanned.dimension if scanned.dimension is not None else "unknown"))
+        if len(invalid_players) > _MAX_LISTED:
+            lines.append("  ! ... and {0} more, see --log".format(len(invalid_players) - _MAX_LISTED))
 
         lines.extend(["", "DIMENSION / REGION-TYPE BREAKDOWN"] )
         breakdown = []
@@ -1978,6 +2167,301 @@ def delete_entities(region_file, x, z):
     return counter
 
 
+def get_chunk_entity_list(chunk):
+    """ Return the TAG_List holding the entities of a chunk.
+
+    Inputs:
+     - chunk -- A level or entities chunk, from the NBT module.
+
+    Return:
+     - entities -- The TAG_List, or None when the chunk stores no entities
+                   (a 1.17+ level chunk whose entities live in entities/).
+
+    The storage place follows scan_chunk(): `entities` at the root since
+    21w43a (1.18), `Level.Entities` before that, and `Entities` at the root of
+    the chunks in entities/*.mca.
+
+    """
+
+    chunk_type = get_chunk_type(chunk)
+    if chunk_type == c.LEVEL_DIR:
+        if "DataVersion" in chunk and chunk["DataVersion"].value >= 2844:
+            return chunk["entities"] if "entities" in chunk else None
+        level = chunk["Level"]
+        return level["Entities"] if "Entities" in level else None
+    elif chunk_type == c.ENTITIES_DIR:
+        return chunk["Entities"]
+    return None
+
+
+def _entity_id(entity):
+    """ Return the id string of an entity compound, or None. """
+
+    try:
+        return entity["id"].value if "id" in entity else None
+    except (AttributeError, TypeError):
+        return None
+
+
+def _entity_position_problem(entity, position_bound):
+    """ Return the bad Pos of an entity or of one of its passengers.
+
+    Inputs:
+     - entity -- A TAG_Compound from an entity list.
+     - position_bound -- Largest accepted absolute x/z coordinate.
+
+    Return:
+     - pos -- The offending (x, y, z) tuple, or None if every position is sane.
+
+    Passengers are saved inside the entity they ride, so a broken passenger is
+    reported against (and removed together with) its root vehicle.
+
+    """
+
+    if not isinstance(entity, nbt.TAG_Compound):
+        return None
+    pos = read_nbt_vector(entity["Pos"]) if "Pos" in entity else None
+    if pos is not None and not is_position_sane(*pos, max_abs_xz=position_bound):
+        return pos
+    if "Passengers" in entity:
+        for passenger in entity["Passengers"]:
+            bad = _entity_position_problem(passenger, position_bound)
+            if bad is not None:
+                return bad
+    return None
+
+
+def find_bad_entities(entity_list, position_bound=None):
+    """ Find the entities of a chunk whose position fails is_position_sane().
+
+    Inputs:
+     - entity_list -- A TAG_List of entity compounds, or None.
+     - position_bound -- Largest accepted absolute x/z coordinate, None for
+                         the default.
+
+    Return:
+     - bad -- A list of (index, entity_id, pos) tuples, in list order.
+
+    """
+
+    if position_bound is None:
+        position_bound = DEFAULT_POSITION_BOUND_XZ
+    bad = []
+    if entity_list is None:
+        return bad
+    for index, entity in enumerate(entity_list):
+        pos = _entity_position_problem(entity, position_bound)
+        if pos is not None:
+            bad.append((index, _entity_id(entity), pos))
+    return bad
+
+
+def remove_bad_entities(region_file, x, z, position_bound=None):
+    """ Remove only the entities of a chunk that fail the position check.
+
+    Inputs:
+     - region_file -- RegionFile object where the chunk is stored
+     - x -- Integer, X local coordinate of the chunk in the region file
+     - z -- Integer, Z local coordinate of the chunk in the region file
+     - position_bound -- Largest accepted absolute x/z coordinate
+
+    Return:
+     - removed -- A list of (entity_id, pos) tuples that were removed.
+     - remaining -- Integer, entities left in the chunk.
+
+    The chunk is only rewritten when something was removed.
+
+    """
+
+    chunk = region_file.get_chunk(x, z)
+    entity_list = get_chunk_entity_list(chunk)
+    bad = find_bad_entities(entity_list, position_bound)
+    # Delete from the end so the earlier indexes stay valid.
+    for index, _entity_id_value, _pos in reversed(bad):
+        del entity_list[index]
+    if bad:
+        region_file.write_chunk(x, z, chunk)
+    remaining = len(entity_list) if entity_list is not None else 0
+    return [(entity_id, pos) for _index, entity_id, pos in bad], remaining
+
+
+def _has_content(entity, tag_name):
+    """ True when an entity has a non-empty tag, like CustomName or Tags. """
+
+    if tag_name not in entity:
+        return False
+    tag = entity[tag_name]
+    value = getattr(tag, 'value', None)
+    if isinstance(value, str):
+        return value.strip() != ""
+    try:
+        return len(tag) > 0
+    except TypeError:
+        return value is not None
+
+
+class EntitySweepReport:
+    """ Result of a --remove-entity-types sweep.
+
+    Attributes:
+     - removed -- {entity_id: count} of matched entities.
+     - by_region -- {region path: {entity_id: count}}.
+     - skipped_named -- Matched entities kept because they have a CustomName.
+     - skipped_tagged -- Matched entities kept because they have Tags.
+     - unreadable_chunks -- Chunks that could not be read and were left alone.
+     - chunks_changed -- Chunks that were (or, in a dry run, would be) rewritten.
+
+    """
+
+    def __init__(self):
+        self.removed = {}
+        self.by_region = {}
+        self.skipped_named = 0
+        self.skipped_tagged = 0
+        self.unreadable_chunks = 0
+        self.chunks_changed = 0
+
+    @property
+    def total_removed(self):
+        return sum(self.removed.values())
+
+    def add(self, region_path, entity_id):
+        self.removed[entity_id] = self.removed.get(entity_id, 0) + 1
+        per_region = self.by_region.setdefault(region_path, {})
+        per_region[entity_id] = per_region.get(entity_id, 0) + 1
+
+    def summary(self, apply, world_root=None):
+        """ Human readable end-of-run summary. """
+
+        verb = "Removed" if apply else "Would remove"
+        lines = []
+        if not apply:
+            lines.append("DRY RUN - nothing was written. Add --apply-entity-removal "
+                         "to remove these entities.")
+        lines.append("{0} {1} {2} in {3} {4}.".format(
+            verb, _fmt_count(self.total_removed),
+            _plural(self.total_removed, "entity", "entities"),
+            _fmt_count(self.chunks_changed), _plural(self.chunks_changed, "chunk")))
+        if self.removed:
+            lines.append("")
+            lines.append("By entity id:")
+            lines.append(_summary_kv([(entity_id, _fmt_count(count))
+                                      for entity_id, count in sorted(self.removed.items())]))
+            lines.append("")
+            lines.append("By region file:")
+            for path in sorted(self.by_region):
+                shown = path
+                if world_root:
+                    try:
+                        shown = os.path.relpath(path, world_root)
+                    except ValueError:
+                        pass
+                counts = ", ".join("{0} x{1}".format(entity_id, count)
+                                   for entity_id, count in sorted(self.by_region[path].items()))
+                lines.append("  {0}: {1}".format(shown, counts))
+        if self.skipped_named or self.skipped_tagged:
+            lines.append("")
+            lines.append("Kept {0} matching {1} with a CustomName (use --include-named) and "
+                         "{2} with Tags (use --include-tagged).".format(
+                             _fmt_count(self.skipped_named),
+                             _plural(self.skipped_named, "entity", "entities"),
+                             _fmt_count(self.skipped_tagged)))
+        if self.unreadable_chunks:
+            lines.append("Skipped {0} unreadable {1}; scan the world to see why.".format(
+                _fmt_count(self.unreadable_chunks), _plural(self.unreadable_chunks, "chunk")))
+        return "\n".join(lines)
+
+
+def _sweep_entity_list(entity_list, type_ids, include_named, include_tagged,
+                       report, region_path):
+    """ Remove matching entities from one entity list, recursing into passengers.
+
+    Return:
+     - changed -- True if anything was (or would be) removed.
+
+    """
+
+    changed = False
+    keep = []
+    for entity in entity_list:
+        if not isinstance(entity, nbt.TAG_Compound):
+            keep.append(entity)
+            continue
+        entity_id = _entity_id(entity)
+        if entity_id is not None and entity_id.lower() in type_ids:
+            if not include_named and _has_content(entity, "CustomName"):
+                report.skipped_named += 1
+            elif not include_tagged and _has_content(entity, "Tags"):
+                report.skipped_tagged += 1
+            else:
+                # Anything riding a removed entity goes with it.
+                report.add(region_path, entity_id)
+                changed = True
+                continue
+        # A zombie riding a chicken is stored inside the chicken.
+        if "Passengers" in entity:
+            if _sweep_entity_list(entity["Passengers"], type_ids, include_named,
+                                  include_tagged, report, region_path):
+                changed = True
+        keep.append(entity)
+    if changed:
+        entity_list.tags[:] = keep
+    return changed
+
+
+def sweep_entity_types(regionsets, type_ids, include_named=False,
+                       include_tagged=False, apply=False, report=None):
+    """ Remove every entity whose id is in type_ids from a set of region files.
+
+    Inputs:
+     - regionsets -- Iterable of RegionSet objects. POI region sets are skipped.
+     - type_ids -- Set of namespaced entity ids to remove.
+     - include_named -- Also remove matching entities that have a CustomName.
+     - include_tagged -- Also remove matching entities that have Tags.
+     - apply -- Write the changes. When False nothing is written and the
+                report says what would have been removed.
+     - report -- An EntitySweepReport to add to, a new one by default.
+
+    Return:
+     - report -- The EntitySweepReport.
+
+    This reads every chunk directly and does not depend on a previous scan,
+    so it also reaches chunks the server never loads.
+
+    """
+
+    if report is None:
+        report = EntitySweepReport()
+    type_ids = {i.lower() for i in type_ids}
+    for regionset in regionsets:
+        if regionset._get_region_type_directory() == c.POI_DIR:
+            continue
+        for scanned in regionset._get_list():
+            try:
+                region_file = region.RegionFile(scanned.path)
+            except Exception:
+                # Too small or unreadable; the normal scan reports it.
+                continue
+            try:
+                for m in region_file.get_metadata():
+                    try:
+                        chunk = region_file.get_chunk(m.x, m.z)
+                        entity_list = get_chunk_entity_list(chunk)
+                    except Exception:
+                        report.unreadable_chunks += 1
+                        continue
+                    if entity_list is None:
+                        continue
+                    if _sweep_entity_list(entity_list, type_ids, include_named,
+                                          include_tagged, report, scanned.path):
+                        report.chunks_changed += 1
+                        if apply:
+                            region_file.write_chunk(m.x, m.z, chunk)
+            finally:
+                region_file.close()
+    return report
+
+
 def _get_local_chunk_coords(chunkx, chunkz):
     """ Gives the chunk local coordinates from the global coordinates.
     
@@ -2087,6 +2571,17 @@ def get_chunk_data_coords(nbt_file):
         raise AssertionError("Unrecognized chunk in get_chunk_data_coords().")
 
     return coordX, coordZ
+
+
+def _free_backup_path(path):
+    """ Return `<path>.bak`, or `<path>.bak.N` if earlier backups exist. """
+
+    candidate = path + ".bak"
+    n = 1
+    while exists(candidate):
+        candidate = "{0}.bak.{1}".format(path, n)
+        n += 1
+    return candidate
 
 
 def _external_chunk_files_for_region(region_path):
