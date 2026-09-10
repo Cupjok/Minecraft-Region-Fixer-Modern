@@ -82,7 +82,8 @@ class MainWindow(wx.Frame):
 
         # Second row:
         self.proc_info_text = wx.StaticText(panel, label="Processes to use: ")
-        self.proc_text = wx.TextCtrl(panel, value="1", size=(30, 24), style=wx.TE_CENTER)
+        # Zero means one worker per logical CPU core.
+        self.proc_text = wx.TextCtrl(panel, value="0", size=(30, 24), style=wx.TE_CENTER)
         self.el_info_text = wx.StaticText(panel, label="Entity limit: " )
         self.el_text = wx.TextCtrl(panel, value="150", size=(50, 24), style=wx.TE_CENTER)
         self.secondrow_sizer = wx.BoxSizer(wx.HORIZONTAL)

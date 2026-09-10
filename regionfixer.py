@@ -24,6 +24,7 @@
 import argparse
 from getpass import getpass
 from multiprocessing import freeze_support
+import os
 import sys
 
 
@@ -35,6 +36,7 @@ from regionfixer_core.scan import (console_scan_world,
                                    ChildProcessException)
 from regionfixer_core.util import entitle, is_bare_console
 from regionfixer_core.version import version_string
+from regionfixer_core import native
 from regionfixer_core import world
 
 
@@ -280,11 +282,19 @@ def main():
 
     parser.add_argument('--processes',
                         '-p',
-                        help='Set the number of workers to use for scanning. (default '
-                             '= 1, not use multiprocessing at all)',
+                        help='Set the number of workers to use for scanning. The '
+                             'default of 0 uses one worker per logical CPU core. '
+                             'Use 1 to scan on a single core.',
                         action='store',
                         type=int,
-                        default=1)
+                        default=0)
+
+    parser.add_argument('--no-native',
+                        help='Do not use the native (Rust) scanner even when it '
+                             'is available, scan with pure Python instead. Same '
+                             'effect as setting REGIONFIXER_NO_NATIVE=1.',
+                        action='store_true',
+                        default=False)
 
     status_abbr = ""
     for status in c.CHUNK_PROBLEMS: 
@@ -365,9 +375,17 @@ def main():
     # Parse all the paths, from text file and command input
     world_list, regionset = world.parse_paths(args.paths + path_lines)
 
+    if args.no_native:
+        os.environ['REGIONFIXER_NO_NATIVE'] = '1'
+
     # print greetings an version number
     print("\nWelcome to Region Fixer!")
     print(("(v {0})".format(version_string)))
+    workers = native.resolve_workers(args.processes)
+    if native.available():
+        print("Scanner: native (Rust) on {0} threads".format(workers))
+    else:
+        print("Scanner: python on {0} processes".format(workers))
 
     # Check if there are valid worlds to scan
     if not (world_list or regionset):

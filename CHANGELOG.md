@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.5.0 - Native scanner
+
+### Added
+
+- Optional native (Rust) scanning core in `native/`, built with `./build_native.sh`,
+  that memory maps region files, decompresses chunks with libdeflate, skims the NBT
+  instead of building a tag tree, and scans region files on a thread pool.
+- `--no-native` and `REGIONFIXER_NO_NATIVE=1` to force the pure Python scanner.
+- Parity tests in `tests/test_native_scanner.py` that scan the same world with both
+  scanners and compare every chunk result.
+
+### Changed
+
+- `--processes`/`-p` now defaults to `0`, meaning one worker per logical CPU core.
+  Pass `-p 1` for the previous single-worker behavior. The GUI field defaults to `0`
+  as well.
+- The startup banner reports which scanner and how many workers are in use.
+
+### Fixed
+
+- When `--delete-entities` empties a crowded chunk, the "too many entities" counter is
+  no longer left incremented for the repaired chunk. This applies to the native
+  scanner path.
+
 ## 0.4.1 - Windows launcher visibility fix
 
 ### Fixed

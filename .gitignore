@@ -11,3 +11,13 @@ dist/
 # Local logs / reports
 *.log
 error.log
+
+# Native scanner build output
+native/target/
+regionfixer_native.abi3.so
+regionfixer_native.so
+regionfixer_native.pyd
+
+# Agent working notes, kept out of the repository
+CLAUDE.md
+HANDOFF.md

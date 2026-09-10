@@ -51,6 +51,41 @@ The original layouts remain supported, including:
 * Existing backup replacement, deletion, fixing, logging, verbose scanning,
   entity limits, and multiprocessing options.
 
+Native scanner
+==============
+
+Scanning is the slow part of Region Fixer, and this fork ships an optional
+scanning core written in Rust. It reads the same bytes as the Python scanner
+but skips over the NBT tags it does not need instead of building a full tag
+tree for every chunk, and it scans region files on a thread pool inside a
+single process.
+
+Building it needs a Rust toolchain (https://rustup.rs)::
+
+    ./build_native.sh
+
+The script compiles the crate in ``native/`` and copies the extension module
+next to ``regionfixer.py``. Region Fixer picks it up automatically; if it is
+not there, the pure Python scanner is used and nothing else changes.
+
+On a 702 MB world of 16 region files (14,000 chunks) on a 14-core machine, a
+full scan takes 0.21 s with the native scanner against 9.08 s for the previous
+single-process default, and 2.89 s for the Python scanner using every core.
+
+The native scanner is conservative. Whenever a region file holds something it
+cannot reproduce exactly, such as an lz4 chunk or a tag of an unexpected type,
+it hands that one file back to the Python scanner, so results are identical
+either way. The test suite scans the same worlds with both and compares them
+chunk by chunk.
+
+To turn it off, pass ``--no-native`` or set ``REGIONFIXER_NO_NATIVE=1``.
+
+Worker count
+============
+
+``--processes``/``-p`` now defaults to ``0``, which means one worker per
+logical CPU core. Pass ``-p 1`` for the old single-worker behavior.
+
 Detailed scan summary
 =====================
 

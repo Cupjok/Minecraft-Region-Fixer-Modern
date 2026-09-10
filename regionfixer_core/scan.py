@@ -43,6 +43,7 @@ from progressbar import ProgressBar, Bar, AdaptiveETA, SimpleProgress
 import regionfixer_core.constants as c
 from regionfixer_core.util import entitle
 from regionfixer_core import world
+from regionfixer_core import native
 
 
 
@@ -215,6 +216,8 @@ class AsyncScanner:
         assert isinstance(data_structure, world.DataSet)
         self.data_structure = data_structure
         self.list_files_to_scan = data_structure._get_list()
+        # A processes count of zero means "one worker per logical core".
+        processes = native.resolve_workers(processes)
         self.processes = processes
         self.scan_function = scan_function
 
@@ -446,6 +449,22 @@ class AsyncRegionsetScanner(AsyncScanner):
         self._str_last_scanned = self.data_structure.get_name() + ": " + r.filename
 
 
+def make_regionset_scanner(regionset, processes, entity_limit,
+                           remove_entities=False):
+    """ Return the fastest available scanner for a RegionSet.
+
+    The native scanner is used when it has been built and the user has not
+    disabled it, otherwise this falls back to the multiprocessing scanner.
+
+    """
+
+    if native.available():
+        return native.NativeRegionsetScanner(regionset, processes,
+                                             entity_limit, remove_entities)
+    return AsyncRegionsetScanner(regionset, processes, entity_limit,
+                                 remove_entities)
+
+
 class AsyncWorldRegionScanner:
     """ Wrapper around the calls of AsyncScanner the whole world.
     
@@ -493,10 +512,10 @@ class AsyncWorldRegionScanner:
     def scan(self):
         """ Scan and fill the given regionset. """
 
-        cr = AsyncRegionsetScanner(self.regionsets.pop(0),
-                                   self.processes,
-                                   self.entity_limit,
-                                   self.remove_entities)
+        cr = make_regionset_scanner(self.regionsets.pop(0),
+                                    self.processes,
+                                    self.entity_limit,
+                                    self.remove_entities)
         self._current_regionset = cr
         cr.scan()
 
@@ -715,8 +734,8 @@ def console_scan_regionset(regionset, processes, entity_limit, remove_entities, 
 
     """
 
-    rs = AsyncRegionsetScanner(regionset, processes, entity_limit,
-                               remove_entities)
+    rs = make_regionset_scanner(regionset, processes, entity_limit,
+                                remove_entities)
     scanners = [rs]
     titles = [entitle("Scanning separate region files", 0)]
     console_scan_loop(scanners, titles, verbose)

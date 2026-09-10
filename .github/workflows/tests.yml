@@ -34,3 +34,33 @@ jobs:
 
       - name: Verify CLI version
         run: python regionfixer.py --version
+
+  native:
+    name: native scanner / ubuntu-latest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run the Rust unit tests
+        run: cargo test --no-default-features --manifest-path native/Cargo.toml
+
+      - name: Build the native scanner
+        run: ./build_native.sh
+
+      - name: Run the test suite with the native scanner
+        run: python -m unittest discover -s tests -v
+
+      - name: Run the test suite without the native scanner
+        run: python -m unittest discover -s tests -v
+        env:
+          REGIONFIXER_NO_NATIVE: '1'
